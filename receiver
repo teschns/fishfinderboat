@@ -1,0 +1,74 @@
+import time
+import board
+import busio
+import digitalio
+import pwmio
+import adafruit_rfm69
+
+# --- Motor A ---
+AIN1 = pwmio.PWMOut(board.D13, frequency=1000)  # Motor A Pin 1 (PWM)
+AIN2 = digitalio.DigitalInOut(board.D12)  # Motor A Pin 2 (DIR)
+AIN2.switch_to_output()
+
+# --- Motor B ---
+BIN1 = pwmio.PWMOut(board.D10, frequency=1000)  # Motor B Pin 1 (PWM)
+BIN2 = digitalio.DigitalInOut(board.D9)  # Motor B Pin 2 (DIR)
+BIN2.switch_to_output()
+
+# --- Sleep Pin (enables the driver) ---
+SLP = digitalio.DigitalInOut(board.D5)
+SLP.switch_to_output()
+SLP.value = True  # Wake up the DRV8833
+
+# Define radio frequency in MHz. Must match your
+# module. Can be a value like 915.0, 433.0, etc.
+RADIO_FREQ_MHZ = 915.0
+
+# Define Chip Select and Reset pins for the radio module.
+CS = digitalio.DigitalInOut(board.RFM_CS)
+RESET = digitalio.DigitalInOut(board.RFM_RST)
+
+# Initialise RFM69 radio
+rfm69 = adafruit_rfm69.RFM69(board.SPI(), CS, RESET, RADIO_FREQ_MHZ)
+
+print("Receiver ready")
+
+# --- Control Function ---
+def set_motor(motor_pwm, motor_dir, speed):
+    if speed == 0:
+        motor_pwm.duty_cycle = 0
+        motor_dir.value = False
+    else:
+        motor_pwm.duty_cycle = speed
+        motor_dir.value = False  # Always forward for now
+
+# --- Main Loop ---
+NEUTRAL = 128
+MAX_SPEED = 65535
+
+while True:
+    packet = rfm69.receive()
+    if packet is not None:
+        try:
+            data = packet.decode().split(",")
+            j_y = int(data[0])  # Forward/back
+            j_x = int(data[1])  # Left/right
+
+            if j_y < NEUTRAL:
+                base_speed = 0
+            else:
+                base_speed = int((j_y - NEUTRAL) / (255 - NEUTRAL) * MAX_SPEED)
+
+            diff = int((j_x - NEUTRAL) / (255 - NEUTRAL) * base_speed)
+
+            left_speed = max(0, min(MAX_SPEED, base_speed - diff))
+            right_speed = max(0, min(MAX_SPEED, base_speed + diff))
+
+            set_motor(AIN1, AIN2, left_speed)
+            set_motor(BIN1, BIN2, right_speed)
+
+            print(f"Y:{j_y} X:{j_x} L:{left_speed} R:{right_speed}")
+
+        except Exception as e:
+            print("Error:", e)
+    #time.sleep(0.05)
