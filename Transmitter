@@ -1,38 +1,43 @@
-import time
-import board
-import busio
-import digitalio
-import analogio
-import adafruit_rfm69
+# Transmitter (CircuitPython)
 
-print("All imports succeeded!")
+import time, board, busio, analogio, digitalio, adafruit_rfm69
 
-# Joystick setup
-# --- Joystick Setup ---
-joystick_y = analogio.AnalogIn(board.A0)  # Vertical axis
-joystick_x = analogio.AnalogIn(board.A1)  # Horizontal axis
+# === Hardware Setup ===
+joy_x = analogio.AnalogIn(board.A0)
+joy_y = analogio.AnalogIn(board.A1)
 
-RADIO_FREQ_MHZ = 915.0
+mode_button = digitalio.DigitalInOut(board.D6)
+mode_button.direction = digitalio.Direction.INPUT
+mode_button.pull = digitalio.Pull.UP
 
-CS = digitalio.DigitalInOut(board.RFM_CS)
-RESET = digitalio.DigitalInOut(board.RFM_RST)
+# Radio (Feather RP2040 RFM69)
+cs = digitalio.DigitalInOut(board.RFM_CS)
+rst = digitalio.DigitalInOut(board.RFM_RST)
+cs.switch_to_output(); rst.switch_to_output()
 
-rfm69 = adafruit_rfm69.RFM69(board.SPI(), CS, RESET, RADIO_FREQ_MHZ)
+spi = busio.SPI(board.SCK, board.MOSI, board.MISO)
+rfm = adafruit_rfm69.RFM69(spi, cs, rst, 915.0)
+rfm.tx_power = 13
 
 print("Transmitter ready")
 
-# --- Utility Functions ---
 def read_joystick(pin):
-    # Convert analog value (0-65535) to 0-255 scale
     return int((pin.value / 65535) * 255)
 
-# --- Main Loop ---
+last_button_state = True
+mode_flag = 0
+
 while True:
-    y_val = read_joystick(joystick_y)
-    x_val = read_joystick(joystick_x)
+    x = read_joystick(joy_x)
+    y = read_joystick(joy_y)
+    b = mode_button.value
 
-    message = f"{y_val},{x_val}"
-    rfm69.send(bytes(message, "utf-8"))
-    print(f"Sent: {message}")
+    # Toggle mode on button press
+    if last_button_state and not b:
+        mode_flag ^= 1
+    last_button_state = b
 
-    #time.sleep(0.05)
+    msg = f"{y},{x},{mode_flag}"
+    rfm.send(bytes(msg, "utf-8"))
+    print("Sent:", msg)
+    time.sleep(0.05)
