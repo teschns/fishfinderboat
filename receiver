@@ -1,74 +1,90 @@
-import time
-import board
-import busio
-import digitalio
-import pwmio
-import adafruit_rfm69
+# Receiver (CircuitPython)
 
-# --- Motor A ---
-AIN1 = pwmio.PWMOut(board.D13, frequency=1000)  # Motor A Pin 1 (PWM)
-AIN2 = digitalio.DigitalInOut(board.D12)  # Motor A Pin 2 (DIR)
-AIN2.switch_to_output()
+import time, board, busio, digitalio, pwmio
+import adafruit_rfm69, adafruit_bno055
 
-# --- Motor B ---
-BIN1 = pwmio.PWMOut(board.D10, frequency=1000)  # Motor B Pin 1 (PWM)
-BIN2 = digitalio.DigitalInOut(board.D9)  # Motor B Pin 2 (DIR)
-BIN2.switch_to_output()
+# === Radio Setup ===
+cs = digitalio.DigitalInOut(board.RFM_CS)
+rst = digitalio.DigitalInOut(board.RFM_RST)
+cs.switch_to_output(); rst.switch_to_output()
 
-# --- Sleep Pin (enables the driver) ---
-SLP = digitalio.DigitalInOut(board.D5)
-SLP.switch_to_output()
-SLP.value = True  # Wake up the DRV8833
+spi = busio.SPI(board.SCK, board.MOSI, board.MISO)
+rfm = adafruit_rfm69.RFM69(spi, cs, rst, 915.0)
+rfm.tx_power = 13
+print("RFM69 receiver ready")
 
-# Define radio frequency in MHz. Must match your
-# module. Can be a value like 915.0, 433.0, etc.
-RADIO_FREQ_MHZ = 915.0
+# === Motor Driver Setup ===
+AIN1 = pwmio.PWMOut(board.D13, frequency=1000)
+AIN2 = digitalio.DigitalInOut(board.D12); AIN2.switch_to_output()
 
-# Define Chip Select and Reset pins for the radio module.
-CS = digitalio.DigitalInOut(board.RFM_CS)
-RESET = digitalio.DigitalInOut(board.RFM_RST)
+BIN1 = pwmio.PWMOut(board.D10, frequency=1000)
+BIN2 = digitalio.DigitalInOut(board.D9); BIN2.switch_to_output()
 
-# Initialise RFM69 radio
-rfm69 = adafruit_rfm69.RFM69(board.SPI(), CS, RESET, RADIO_FREQ_MHZ)
+SLP = digitalio.DigitalInOut(board.D5); SLP.switch_to_output(); SLP.value = True
 
-print("Receiver ready")
+# === IMU Setup ===
+i2c = busio.I2C(board.SCL, board.SDA)
+imu = adafruit_bno055.BNO055_I2C(i2c)
 
-# --- Control Function ---
-def set_motor(motor_pwm, motor_dir, speed):
-    if speed == 0:
-        motor_pwm.duty_cycle = 0
-        motor_dir.value = False
-    else:
-        motor_pwm.duty_cycle = speed
-        motor_dir.value = False  # Always forward for now
-
-# --- Main Loop ---
+# === Control Logic ===
 NEUTRAL = 128
-MAX_SPEED = 65535
+MAX = 65535
+TIMEOUT = 0.5
+kp = 0.005
+
+last_time = time.monotonic()
+target_heading = None
+heading_hold = False
+
+def set_motor(pwm, dirpin, speed, forward=True):
+    pwm.duty_cycle = abs(speed)
+    dirpin.value = not forward
 
 while True:
-    packet = rfm69.receive()
-    if packet is not None:
+    pkt = rfm.receive(timeout=0.1)
+    current = time.monotonic()
+
+    if pkt:
+        last_time = current
         try:
-            data = packet.decode().split(",")
-            j_y = int(data[0])  # Forward/back
-            j_x = int(data[1])  # Left/right
+            y, x, mode = map(int, pkt.decode().split(","))
+        except:
+            continue
 
-            if j_y < NEUTRAL:
-                base_speed = 0
-            else:
-                base_speed = int((j_y - NEUTRAL) / (255 - NEUTRAL) * MAX_SPEED)
+        # Throttle: -127..127
+        norm = (y - NEUTRAL) / (255 - NEUTRAL)
+        base = int(abs(norm) * MAX)
+        forward = (norm >= 0)
 
-            diff = int((j_x - NEUTRAL) / (255 - NEUTRAL) * base_speed)
+        # Steering diff: -base..base
+        diff = int(((x - NEUTRAL) / (255 - NEUTRAL)) * base)
 
-            left_speed = max(0, min(MAX_SPEED, base_speed - diff))
-            right_speed = max(0, min(MAX_SPEED, base_speed + diff))
+        # Mode toggle (on transmitter), capture heading
+        if mode and not heading_hold:
+            heading_hold = True
+            target_heading = imu.euler[0] if imu.euler else 0
+        elif mode == 0:
+            heading_hold = False
 
-            set_motor(AIN1, AIN2, left_speed)
-            set_motor(BIN1, BIN2, right_speed)
+        # Heading hold adjustment
+        if heading_hold and imu.euler:
+            h = imu.euler[0]
+            err = ((h - target_heading + 540) % 360) - 180
+            adjust = kp * err
+            left = base - int(adjust * base)
+            right = base + int(adjust * base)
+        else:
+            left = base - diff
+            right = base + diff
 
-            print(f"Y:{j_y} X:{j_x} L:{left_speed} R:{right_speed}")
+        set_motor(AIN1, AIN2, left, forward)
+        set_motor(BIN1, BIN2, right, forward)
 
-        except Exception as e:
-            print("Error:", e)
-    #time.sleep(0.05)
+        print(f"Y:{y} X:{x} Mode:{mode} LH:{left} RH:{right}")
+
+    # Timeout — stop motors if no packet for TIMEOUT
+    if current - last_time > TIMEOUT:
+        set_motor(AIN1, AIN2, 0, True)
+        set_motor(BIN1, BIN2, 0, True)
+
+    time.sleep(0.02)
