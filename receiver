@@ -4,32 +4,99 @@ import busio
 import digitalio
 import pwmio
 import adafruit_rfm69
+import adafruit_bno055
 
-# --- Motor A ---
-AIN1 = pwmio.PWMOut(board.D13, frequency=1000)  # Motor A Pin 1 (PWM)
-AIN2 = digitalio.DigitalInOut(board.D12)  # Motor A Pin 2 (DIR)
-AIN2.switch_to_output()
-
-# --- Motor B ---
-BIN1 = pwmio.PWMOut(board.D10, frequency=1000)  # Motor B Pin 1 (PWM)
-BIN2 = digitalio.DigitalInOut(board.D9)  # Motor B Pin 2 (DIR)
-BIN2.switch_to_output()
-
-# --- Sleep Pin (enables the driver) ---
-SLP = digitalio.DigitalInOut(board.D5)
-SLP.switch_to_output()
-SLP.value = True  # Wake up the DRV8833
-
-# Define radio frequency in MHz. Must match your
-# module. Can be a value like 915.0, 433.0, etc.
+# --- Radio Setup ---
 RADIO_FREQ_MHZ = 915.0
-
-# Define Chip Select and Reset pins for the radio module.
 CS = digitalio.DigitalInOut(board.RFM_CS)
 RESET = digitalio.DigitalInOut(board.RFM_RST)
+CS.switch_to_output()
+RESET.switch_to_output()
+spi = busio.SPI(board.SCK, board.MOSI, board.MISO)
+rfm69 = adafruit_rfm69.RFM69(spi, CS, RESET, RADIO_FREQ_MHZ)
+rfm69.tx_power = 13
+print("RFM69 receiver ready")
 
-# Initialise RFM69 radio
-rfm69 = adafruit_rfm69.RFM69(board.SPI(), CS, RESET, RADIO_FREQ_MHZ)
+# --- IMU Setup ---
+i2c = busio.I2C(board.SCL, board.SDA)
+bno = adafruit_bno055.BNO055_I2C(i2c)
 
-print("Receiver ready")
+# --- Motor Setup ---
+AIN1 = pwmio.PWMOut(board.D13, frequency=1000)
+AIN2 = digitalio.DigitalInOut(board.D12)
+AIN2.switch_to_output()
 
+BIN1 = pwmio.PWMOut(board.D10, frequency=1000)
+BIN2 = digitalio.DigitalInOut(board.D9)
+BIN2.switch_to_output()
+
+SLP = digitalio.DigitalInOut(board.D5)
+SLP.switch_to_output()
+SLP.value = True
+
+# --- Constants ---
+MAX_SPEED = 65535
+NEUTRAL = 128
+STEER_GAIN = 5  # proportional gain for heading hold
+
+# --- Utility ---
+def set_motor(pwm, dir_pin, speed):
+    if speed >= 0:
+        dir_pin.value = False  # forward
+        pwm.duty_cycle = min(int(speed), MAX_SPEED)
+    else:
+        dir_pin.value = True  # reverse
+        pwm.duty_cycle = min(int(-speed), MAX_SPEED)
+
+# --- Main Loop ---
+while True:
+    packet = rfm69.receive()
+    if packet is not None:
+        try:
+            data = packet.decode().split(",")
+            mode = int(data[0])
+            throttle_val = int(data[1])
+            x_val = int(data[2])
+            heading_cmd = int(data[3])
+
+            if mode == 0:  # Manual Mode
+                throttle = (throttle_val - 128) / 127  # -1 to 1
+                steer = (x_val - 128) / 127  # -1 to 1
+
+                left_speed = throttle - steer
+                right_speed = throttle + steer
+
+                # scale to PWM range
+                set_motor(AIN1, AIN2, left_speed * MAX_SPEED)
+                set_motor(BIN1, BIN2, right_speed * MAX_SPEED)
+
+                print(f"Manual: Throttle={throttle:.2f} Steer={steer:.2f}")
+
+            elif mode == 1:  # Heading Hold Mode
+                # Read actual heading from BNO055
+                current_heading = bno.euler[0] or 0  # handle None
+
+                # Compute heading error (account for wraparound)
+                heading_error = (heading_cmd - current_heading + 540) % 360 - 180
+
+                correction = heading_error * STEER_GAIN / 180  # scale correction
+
+                throttle = (throttle_val - 128) / 127
+
+                left_speed = throttle - correction
+                right_speed = throttle + correction
+
+                set_motor(AIN1, AIN2, left_speed * MAX_SPEED)
+                set_motor(BIN1, BIN2, right_speed * MAX_SPEED)
+
+                print(f"Heading Hold: T={throttle:.2f} Hcmd={heading_cmd} Hcur={current_heading:.1f} Err={heading_error:.1f}")
+
+            elif mode == 2:
+                # GPS mode placeholder
+                set_motor(AIN1, AIN2, 0)
+                set_motor(BIN1, BIN2, 0)
+                print("GPS Mode (inactive)")
+
+        except Exception as e:
+            print("Error:", e)
+    time.sleep(0.05)
