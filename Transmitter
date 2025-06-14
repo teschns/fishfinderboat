@@ -1,38 +1,24 @@
+# SPDX-FileCopyrightText: 2021 ladyada for Adafruit Industries
+# SPDX-License-Identifier: MIT
+
 import time
+
 import board
-import busio
-import digitalio
-import analogio
-import adafruit_rfm69
 
-print("All imports succeeded!")
+import adafruit_nunchuk
 
-# Joystick setup
-# --- Joystick Setup ---
-joystick_y = analogio.AnalogIn(board.A0)  # Vertical axis
-joystick_x = analogio.AnalogIn(board.A1)  # Horizontal axis
+i2c = board.I2C()  # uses board.SCL and board.SDA
+# i2c = board.STEMMA_I2C()  # For using the built-in STEMMA QT connector on a microcontroller
+nc = adafruit_nunchuk.Nunchuk(i2c)
 
-RADIO_FREQ_MHZ = 915.0
-
-CS = digitalio.DigitalInOut(board.RFM_CS)
-RESET = digitalio.DigitalInOut(board.RFM_RST)
-
-rfm69 = adafruit_rfm69.RFM69(board.SPI(), CS, RESET, RADIO_FREQ_MHZ)
-
-print("Transmitter ready")
-
-# --- Utility Functions ---
-def read_joystick(pin):
-    # Convert analog value (0-65535) to 0-255 scale
-    return int((pin.value / 65535) * 255)
-
-# --- Main Loop ---
 while True:
-    y_val = read_joystick(joystick_y)
-    x_val = read_joystick(joystick_x)
+    x, y = nc.joystick
+    ax, ay, az = nc.acceleration
+    print(f"joystick = {x},{y}")
+    print(f"accceleration ax={ax}, ay={ay}, az={az}")
 
-    message = f"{y_val},{x_val}"
-    rfm69.send(bytes(message, "utf-8"))
-    print(f"Sent: {message}")
-
-    #time.sleep(0.05)
+    if nc.buttons.C:
+        print("button C")
+    if nc.buttons.Z:
+        print("button Z")
+    time.sleep(0.5)
