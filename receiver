@@ -27,7 +27,7 @@ AIN2 = digitalio.DigitalInOut(board.D12)
 AIN2.switch_to_output()
 
 BIN1 = pwmio.PWMOut(board.D10, frequency=1000)
-BIN2 = digitalio.DigitalInOut(board.D9)
+BIN2 = digitalio.DigitalInOut(board.D11)
 BIN2.switch_to_output()
 
 SLP = digitalio.DigitalInOut(board.D5)
