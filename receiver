@@ -73,7 +73,6 @@ while True:
                     throttle = 0
                 if abs(steer) < 0.05:
                     steer = 0
-
                 # Mixing for differential drive
                 left_speed = throttle - steer
                 right_speed = throttle + steer
@@ -86,28 +85,58 @@ while True:
                 set_motor(AIN1, AIN2, left_speed * MAX_SPEED)
                 set_motor(BIN1, BIN2, right_speed * MAX_SPEED)
 
-                print(f"Manual: Throttle={throttle:.2f} Steer={steer:.2f} Right={right_speed:.2f} Left={left_speed:.2f} Rx={throttle_val} {x_val}")
-
+                print(
+                    f"Manual: Throttle={throttle:.2f} Steer={steer:.2f} Right={right_speed:.2f} Left={left_speed:.2f} Rx={throttle_val} {x_val}"
+                )
+            
+            
             elif mode == 1:  # Heading Hold Mode
-                # Read actual heading from BNO055
                 current_heading = bno.euler[0] or 0  # handle None
 
-                # Compute heading error (account for wraparound)
+                # Wrap-around safe heading error
                 heading_error = (heading_cmd - current_heading + 540) % 360 - 180
 
-                correction = heading_error * STEER_GAIN / 180  # scale correction
+                # Apply simple proportional gain (reduce gain for stability)
+                correction = heading_error * 0.02  # much lower gain
 
-                throttle = (throttle_val - 128) / 127
+                # Clamp correction to avoid wild steering
+                correction = max(-1, min(1, correction))
 
+                JOYSTICK_CENTER = 120
+                FORWARD_RANGE = 127
+                REVERSE_RANGE = 120
+
+                raw_throttle = throttle_val - JOYSTICK_CENTER
+
+                if raw_throttle >= 0:
+                    throttle = raw_throttle / FORWARD_RANGE
+                else:
+                    throttle = raw_throttle / -REVERSE_RANGE
+
+
+                # Deadzone
+                if abs(throttle) < 0.05:
+                    throttle = 0
+
+                # Clamp
+                throttle = max(-1, min(1, throttle))
+
+                # Apply mixing
                 left_speed = throttle - correction
                 right_speed = throttle + correction
 
+                # Clamp final motor speeds
+                left_speed = max(-1, min(1, left_speed))
+                right_speed = max(-1, min(1, right_speed))
+
+                # Output to motors
                 set_motor(AIN1, AIN2, left_speed * MAX_SPEED)
                 set_motor(BIN1, BIN2, right_speed * MAX_SPEED)
 
                 print(
-                    f"Heading Hold: T={throttle:.2f} Hcmd={heading_cmd} Hcur={current_heading:.1f} Err={heading_error:.1f}"
+                    f"Heading Hold: T={throttle:.2f} Hcmd={heading_cmd} Hcur={current_heading:.1f} Err={heading_error:.1f} Corr={correction:.2f}"
                 )
+            
             elif mode == 2:
                 # GPS mode placeholder
                 set_motor(AIN1, AIN2, 0)
