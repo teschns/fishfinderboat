@@ -48,6 +48,7 @@ def set_motor(pwm, dir_pin, speed):
         dir_pin.value = True  # reverse
         pwm.duty_cycle = min(int(-speed), MAX_SPEED)
 
+
 # --- Main Loop ---
 while True:
     packet = rfm69.receive()
@@ -60,17 +61,32 @@ while True:
             heading_cmd = int(data[3])
 
             if mode == 0:  # Manual Mode
-                throttle = (throttle_val - 128) / 127  # -1 to 1
-                steer = (x_val - 128) / 127  # -1 to 1
+                JOYSTICK_CENTER = 120
+                JOYSTICK_RANGE = 127  # scale from -1 to 1
 
+                # Normalize
+                throttle = (throttle_val - JOYSTICK_CENTER) / JOYSTICK_RANGE
+                steer = (x_val - JOYSTICK_CENTER) / JOYSTICK_RANGE
+
+                # Apply deadzone
+                if abs(throttle) < 0.05:
+                    throttle = 0
+                if abs(steer) < 0.05:
+                    steer = 0
+
+                # Mixing for differential drive
                 left_speed = throttle - steer
                 right_speed = throttle + steer
 
-                # scale to PWM range
+                # Clamp outputs to [-1, 1] to avoid exceeding PWM limits
+                left_speed = max(-1, min(1, left_speed))
+                right_speed = max(-1, min(1, right_speed))
+
+                # Scale to PWM range
                 set_motor(AIN1, AIN2, left_speed * MAX_SPEED)
                 set_motor(BIN1, BIN2, right_speed * MAX_SPEED)
 
-                print(f"Manual: Throttle={throttle:.2f} Steer={steer:.2f}")
+                print(f"Manual: Throttle={throttle:.2f} Steer={steer:.2f} Right={right_speed:.2f} Left={left_speed:.2f} Rx={throttle_val} {x_val}")
 
             elif mode == 1:  # Heading Hold Mode
                 # Read actual heading from BNO055
@@ -89,14 +105,14 @@ while True:
                 set_motor(AIN1, AIN2, left_speed * MAX_SPEED)
                 set_motor(BIN1, BIN2, right_speed * MAX_SPEED)
 
-                print(f"Heading Hold: T={throttle:.2f} Hcmd={heading_cmd} Hcur={current_heading:.1f} Err={heading_error:.1f}")
-
+                print(
+                    f"Heading Hold: T={throttle:.2f} Hcmd={heading_cmd} Hcur={current_heading:.1f} Err={heading_error:.1f}"
+                )
             elif mode == 2:
                 # GPS mode placeholder
                 set_motor(AIN1, AIN2, 0)
                 set_motor(BIN1, BIN2, 0)
                 print("GPS Mode (inactive)")
-
         except Exception as e:
             print("Error:", e)
     time.sleep(0.05)
