@@ -4,7 +4,9 @@ import busio
 import digitalio
 import pwmio
 import adafruit_rfm69
+import adafruit_gps
 import adafruit_bno055
+import math
 
 # --- Radio Setup ---
 RADIO_FREQ_MHZ = 915.0
@@ -17,9 +19,25 @@ rfm69 = adafruit_rfm69.RFM69(spi, CS, RESET, RADIO_FREQ_MHZ)
 rfm69.tx_power = 13
 print("RFM69 receiver ready")
 
+# --- GPS Setup ---
+uart_gps = busio.UART(board.TX, board.RX, baudrate=9600, timeout=10)
+gps = adafruit_gps.GPS(uart_gps, debug=False)
+gps.send_command(b"PMTK314,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0")
+gps.send_command(b"PMTK220,1000")
+print("GPS initialized")
+
 # --- IMU Setup ---
 i2c = busio.I2C(board.SCL, board.SDA)
 bno = adafruit_bno055.BNO055_I2C(i2c)
+print("IMU initialized")
+
+# Wait for BNO055 to finish initializing and calibrate
+print("Calibrating IMU. Rotate and move the device slowly in all directions...")
+while not all(bno.calibration_status):
+    sys, gyro, accel, mag = bno.calibration_status
+    print(f"Cal status -> SYS:{sys} G:{gyro} A:{accel} M:{mag}")
+    time.sleep(1)
+print("IMU calibration complete.")
 
 # --- Motor Setup ---
 AIN1 = pwmio.PWMOut(board.D13, frequency=1000)
@@ -36,8 +54,21 @@ SLP.value = True
 
 # --- Constants ---
 MAX_SPEED = 65535
-NEUTRAL = 128
-STEER_GAIN = 5  # proportional gain for heading hold
+JOYSTICK_CENTER = 120
+JOYSTICK_RANGE = 127  # scale from -1 to 1
+WAYPOINT_THRESHOLD_METERS = 3.0
+
+# --- Waypoint Recorder ---
+waypoints = []
+recording = False
+current_waypoint_index = 0
+
+# --- PID Controller ---
+pid_integral = 0
+last_heading_error = 0
+KP = 0.03
+KI = 0.0005
+KD = 0.01
 
 # --- Utility ---
 def set_motor(pwm, dir_pin, speed):
@@ -48,100 +79,122 @@ def set_motor(pwm, dir_pin, speed):
         dir_pin.value = True  # reverse
         pwm.duty_cycle = min(int(-speed), MAX_SPEED)
 
+def haversine(lat1, lon1, lat2, lon2):
+    R = 6371000  # Earth radius in meters
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dphi = math.radians(lat2 - lat1)
+    dlambda = math.radians(lon2 - lon1)
+    a = math.sin(dphi / 2.0)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0)**2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+def bearing_to(lat1, lon1, lat2, lon2):
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    dlambda = math.radians(lon2 - lon1)
+    y = math.sin(dlambda) * math.cos(phi2)
+    x = math.cos(phi1) * math.sin(phi2) - math.sin(phi1) * math.cos(phi2) * math.cos(dlambda)
+    return (math.degrees(math.atan2(y, x)) + 360) % 360
 
 # --- Main Loop ---
+gps_last_update = time.monotonic()
 while True:
+    gps.update()
+    now = time.monotonic()
     packet = rfm69.receive()
+
     if packet is not None:
         try:
             data = packet.decode().split(",")
             mode = int(data[0])
             throttle_val = int(data[1])
             x_val = int(data[2])
-            heading_cmd = int(data[3])
+            waypoint_flag = int(data[3])  # 1 if recording waypoint
 
-            if mode == 0:  # Manual Mode
-                JOYSTICK_CENTER = 120
-                JOYSTICK_RANGE = 127  # scale from -1 to 1
-
-                # Normalize
+            if mode == 0:  # Manual/Record Mode
                 throttle = (throttle_val - JOYSTICK_CENTER) / JOYSTICK_RANGE
                 steer = (x_val - JOYSTICK_CENTER) / JOYSTICK_RANGE
-
-                # Apply deadzone
-                if abs(throttle) < 0.05:
-                    throttle = 0
-                if abs(steer) < 0.05:
-                    steer = 0
-                # Mixing for differential drive
-                left_speed = throttle - steer
-                right_speed = throttle + steer
-
-                # Clamp outputs to [-1, 1] to avoid exceeding PWM limits
-                left_speed = max(-1, min(1, left_speed))
-                right_speed = max(-1, min(1, right_speed))
-
-                # Scale to PWM range
-                set_motor(AIN1, AIN2, left_speed * MAX_SPEED)
-                set_motor(BIN1, BIN2, right_speed * MAX_SPEED)
-
-                print(
-                    f"Manual: Throttle={throttle:.2f} Steer={steer:.2f} Right={right_speed:.2f} Left={left_speed:.2f} Rx={throttle_val} {x_val}"
-                )
-            
-            
-            elif mode == 1:  # Heading Hold Mode
-                current_heading = bno.euler[0] or 0  # handle None
-
-                # Wrap-around safe heading error
-                heading_error = (heading_cmd - current_heading + 540) % 360 - 180
-
-                # Apply simple proportional gain (reduce gain for stability)
-                correction = heading_error * 0.02  # much lower gain
-
-                # Clamp correction to avoid wild steering
-                correction = max(-1, min(1, correction))
-
-                JOYSTICK_CENTER = 120
-                FORWARD_RANGE = 127
-                REVERSE_RANGE = 120
-
-                raw_throttle = throttle_val - JOYSTICK_CENTER
-
-                if raw_throttle >= 0:
-                    throttle = raw_throttle / FORWARD_RANGE
-                else:
-                    throttle = raw_throttle / -REVERSE_RANGE
-
 
                 # Deadzone
                 if abs(throttle) < 0.05:
                     throttle = 0
+                if abs(steer) < 0.05:
+                    steer = 0
 
-                # Clamp
-                throttle = max(-1, min(1, throttle))
+                left_speed = max(-1, min(1, throttle - steer))
+                right_speed = max(-1, min(1, throttle + steer))
 
-                # Apply mixing
-                left_speed = throttle - correction
-                right_speed = throttle + correction
-
-                # Clamp final motor speeds
-                left_speed = max(-1, min(1, left_speed))
-                right_speed = max(-1, min(1, right_speed))
-
-                # Output to motors
                 set_motor(AIN1, AIN2, left_speed * MAX_SPEED)
                 set_motor(BIN1, BIN2, right_speed * MAX_SPEED)
 
-                print(
-                    f"Heading Hold: T={throttle:.2f} Hcmd={heading_cmd} Hcur={current_heading:.1f} Err={heading_error:.1f} Corr={correction:.2f}"
-                )
-            
-            elif mode == 2:
-                # GPS mode placeholder
-                set_motor(AIN1, AIN2, 0)
-                set_motor(BIN1, BIN2, 0)
-                print("GPS Mode (inactive)")
+                if waypoint_flag and not recording:
+                    if gps.has_fix:
+                        waypoint = {
+                            "lat": gps.latitude,
+                            "lon": gps.longitude,
+                            "throttle": throttle
+                        }
+                        waypoints.append(waypoint)
+                        print(f"Recorded waypoint: {waypoint}")
+                    else:
+                        print("No GPS fix — cannot record waypoint.")
+                    recording = True
+                elif not waypoint_flag:
+                    recording = False
+
+                print(f"Manual: T={throttle:.2f} S={steer:.2f} L={left_speed:.2f} R={right_speed:.2f} WP={waypoint_flag}")
+
+            elif mode == 1:  # Waypoint Playback Mode
+                if gps.has_fix and current_waypoint_index < len(waypoints):
+                    wp = waypoints[current_waypoint_index]
+                    dist = haversine(gps.latitude, gps.longitude, wp["lat"], wp["lon"])
+                    target_bearing = bearing_to(gps.latitude, gps.longitude, wp["lat"], wp["lon"])
+
+                    # Combined heading estimation
+                    heading_gps = gps.track_angle_deg or 0
+                    heading_imu = bno.euler[0] or 0
+
+                    # Blend: if GPS speed < 0.5 m/s, trust IMU more
+                    if gps.speed_knots is not None and gps.speed_knots * 0.514 < 0.5:
+                        heading = heading_imu
+                    else:
+                        heading = (0.3 * heading_imu + 0.7 * heading_gps) % 360
+
+                    heading_error = (target_bearing - heading + 540) % 360 - 180
+
+                    # PID Calculation
+                    pid_integral += heading_error
+                    derivative = heading_error - last_heading_error
+                    last_heading_error = heading_error
+                    correction = KP * heading_error + KI * pid_integral + KD * derivative
+                    correction = max(-1, min(1, correction))
+
+                    throttle = wp["throttle"]
+                    left_speed = max(-1, min(1, throttle - correction))
+                    right_speed = max(-1, min(1, throttle + correction))
+
+                    if dist < WAYPOINT_THRESHOLD_METERS:
+                        print(f"Reached waypoint {current_waypoint_index+1}, moving to next.")
+                        current_waypoint_index += 1
+                        pid_integral = 0
+                        last_heading_error = 0
+                    else:
+                        set_motor(AIN1, AIN2, left_speed * MAX_SPEED)
+                        set_motor(BIN1, BIN2, right_speed * MAX_SPEED)
+                        print(f"Navigating to WP{current_waypoint_index+1}: dist={dist:.1f}m T={throttle:.2f} H_err={heading_error:.1f} PID_corr={correction:.2f}")
+                else:
+                    set_motor(AIN1, AIN2, 0)
+                    set_motor(BIN1, BIN2, 0)
+                    if current_waypoint_index >= len(waypoints):
+                        print("All waypoints complete.")
+                    else:
+                        print("Waiting for GPS fix...")
+
         except Exception as e:
             print("Error:", e)
+
+    if now - gps_last_update >= 1.0:
+        gps.update()
+        gps_last_update = now
+
     time.sleep(0.05)
