@@ -21,14 +21,10 @@ i2c = board.I2C()
 nc = adafruit_nunchuk.Nunchuk(i2c)
 
 # --- Mode Handling ---
-mode = 0  # 0=Manual, 1=Heading Hold, 2=GPS (future)
-mode_names = ["Manual", "Heading Hold", "GPS"]
+mode = 0  # 0 = Manual, 1 = GPS
+mode_names = ["Manual", "GPS"]
 
-# --- Heading Hold Variables ---
-desired_heading = 0.0
-HEADING_RATE = 0.1  # degrees per joystick unit per loop
-
-# --- Debounce buttons ---
+# --- Debounce Buttons ---
 prev_c = False
 prev_z = False
 
@@ -38,39 +34,30 @@ while True:
     button_c = nc.buttons.C
     button_z = nc.buttons.Z
 
-    # Normalize joystick values to 0-255 range
+    # Normalize joystick values to 0–255 range
     j_x = min(max(int((joystick_x - 32) * 255 / (231 - 32)), 0), 255)
     j_y = min(max(int((joystick_y - 32) * 255 / (231 - 32)), 0), 255)
 
-    # Mode switching (only when both buttons pressed together)
+    # Mode switching with both buttons
     if button_c and button_z and not (prev_c and prev_z):
-        mode = (mode + 1) % 3
+        mode = (mode + 1) % 2  # Toggle between 0 and 1
         print("MODE SWITCHED:", mode_names[mode])
-        time.sleep(0.3)  # debounce delay
+        time.sleep(0.3)  # debounce
 
     prev_c = button_c
     prev_z = button_z
 
-    if mode == 0:  # Manual mode
-        message = f"{mode},{j_y},{j_x},0"
-        print(f"Manual: Y={j_y} X={j_x}")
+    if mode == 0:
+        # Manual mode: send joystick + waypoint flag
+        waypoint_flag = 1 if button_c else 0
+        message = f"{mode},{j_y},{j_x},{waypoint_flag}"
+        print(f"Manual: Y={j_y}, X={j_x}, Waypoint={waypoint_flag}")
 
-    elif mode == 1:  # Heading Hold mode
-        # Use Y for throttle, X for heading adjustment
-        throttle = j_y
-
-        # Adjust desired heading by joystick X
-        heading_delta = (j_x - 128) * HEADING_RATE
-        desired_heading += heading_delta
-        desired_heading %= 360  # wrap 0-360
-
-        message = f"{mode},{throttle},0,{int(desired_heading)}"
-        print(f"Heading Hold: Throttle={throttle} Heading={int(desired_heading)}")
-
-    elif mode == 2:  # GPS mode reserved
+    elif mode == 1:
+        # GPS Waypoint Mode: send mode only
         message = f"{mode},0,0,0"
-        print("GPS Mode (not implemented)")
+        print("GPS Mode (Waypoint Following Active)")
 
-    # Send message via RFM69
+    # Send over RFM69
     rfm69.send(bytes(message, "utf-8"))
     time.sleep(0.05)
